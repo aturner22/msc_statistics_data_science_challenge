@@ -2,13 +2,12 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import OrdinalEncoder, StandardScaler
 import xgboost as xgb
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_score, recall_score, classification_report, confusion_matrix
 
 # --- Load Data ---
 df = pd.read_csv("data/old_transactions_training_sept_oct_2023.csv", sep=';', decimal=',')
 df['DATETIME_GMT'] = pd.to_datetime(df['DATETIME_GMT'])
 df['hour'] = df['DATETIME_GMT'].dt.hour
-df['day_of_week'] = df['DATETIME_GMT'].dt.dayofweek
 
 # --- Feature Engineering ---
 df['time_since_last_transaction'] = df.groupby('ID_CARD')['DATETIME_GMT'].diff().dt.total_seconds()
@@ -21,10 +20,10 @@ df['rolling_mean_amt_card5'] = (
 )
 pop_anoms = [col for col in df.columns if 'Population_Anomaly_' in col]
 df['pop_anom_sum'] = df[pop_anoms].sum(axis=1)
-df['day_of_week'] = df['day_of_week'].astype('category')
-df['hour'] = df['hour'].astype('category')
+df['day_of_week'] = df['DATETIME_GMT'].dt.dayofweek.astype('category')
+df['hour_cat'] = df['hour'].astype('category')
 ordinal = OrdinalEncoder()
-df[['day_of_week', 'hour']] = ordinal.fit_transform(df[['day_of_week', 'hour']])
+df[['day_of_week', 'hour_cat']] = ordinal.fit_transform(df[['day_of_week', 'hour_cat']])
 
 # --- Best Feature Combo ---
 base_features = [
@@ -36,7 +35,7 @@ base_features = [
     'FLAG_BEHAVIOUR_Anomaly7', 'FLAG_BEHAVIOUR_Anomaly_8', 'Anomaly_amount_9',
     'Population_Anomaly_1', 'Population_Anomaly_2', 'Population_Anomaly_3', 'Population_Anomaly_4',
     'Population_Anomaly_5', 'Population_Anomaly_6', 'Population_Anomaly_7', 'Population_Anomaly_8',
-    'hour', 'day_of_week'
+    'hour_cat', 'day_of_week'
 ]
 best_feats = base_features + ['trx_count_card', 'rolling_mean_amt_card5', 'pop_anom_sum']
 
@@ -44,31 +43,6 @@ X = df[best_feats].copy()
 y = df['FLAG_FRAUD']
 scaler = StandardScaler()
 X[X.columns.difference(['ID_CARD'])] = scaler.fit_transform(X[X.columns.difference(['ID_CARD'])])
-
-# --- 5-Fold CV F1 for reporting ---
-from sklearn.model_selection import StratifiedKFold
-kf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-f1s = []
-for train_idx, val_idx in kf.split(X, y):
-    X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
-    y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
-    scale_pos_weight = (y_train == 0).sum() / (y_train == 1).sum()
-    model = xgb.XGBClassifier(
-        objective='binary:logistic',
-        eval_metric='logloss',
-        scale_pos_weight=scale_pos_weight,
-        max_depth=6,
-        learning_rate=0.1,
-        n_estimators=100,
-        random_state=42
-    )
-    model.fit(X_train, y_train)
-    y_pred_proba = model.predict_proba(X_val)[:, 1]
-    y_pred = (y_pred_proba > 0.5).astype(int)
-    f1 = f1_score(y_val, y_pred)
-    f1s.append(f1)
-print(f"Best Model 5-Fold F1 Scores: {np.round(f1s, 4)}")
-print(f"Mean F1: {np.mean(f1s):.4f}, Std: {np.std(f1s):.4f}\n")
 
 # --- Train Model on All Data ---
 scale_pos_weight = (y == 0).sum() / (y == 1).sum()
@@ -83,14 +57,26 @@ model = xgb.XGBClassifier(
 )
 model.fit(X, y)
 
-# --- Predict (preserve order) ---
-y_pred_proba = model.predict_proba(X)[:, 1]
-y_pred = (y_pred_proba > 0.5).astype(int)
-df_out = df.copy()
-df_out['PREDICTED_FRAUD'] = y_pred
-df_out = df_out.sort_index()  # Restore original order
+# --- Predict on Afternoon Subset Only (without refitting) ---
+afternoon_mask = (df['hour'] >= 12) & (df['hour'] < 18)
+X_afternoon = X[afternoon_mask]
+y_afternoon = y[afternoon_mask]
+y_pred_proba_afternoon = model.predict_proba(X_afternoon)[:, 1]
+THRESHOLD = 0.65
+y_pred_afternoon = (y_pred_proba_afternoon > THRESHOLD).astype(int)
 
-# Save predictions
-out_path = 'jamie/fraud_predictions.csv'
-df_out[['ID_TRX', 'PREDICTED_FRAUD']].to_csv(out_path, index=False)
-print(f"Predictions saved to {out_path}") 
+print(f"\nEvaluation on AFTERNOON transactions (12 <= hour < 18) with threshold {THRESHOLD}:")
+print(classification_report(y_afternoon, y_pred_afternoon, digits=4))
+print("Confusion Matrix:")
+print(confusion_matrix(y_afternoon, y_pred_afternoon)) 
+
+
+df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
+df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
+
+
+
+df['amount_zscore_card'] = (
+    df.groupby('ID_CARD')['AMOUNT']
+      .transform(lambda x: (x - x.mean()) / (x.std() + 1e-6))
+)

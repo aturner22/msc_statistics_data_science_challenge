@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 # --- Data Loading & Preprocessing ---
-df = pd.read_csv("data/transactions_training_sept_oct_2023.csv", sep=';', decimal=',')
+df = pd.read_csv("data/old_transactions_training_sept_oct_2023.csv", sep=';', decimal=',')
 df['DATETIME_GMT'] = pd.to_datetime(df['DATETIME_GMT'])
 df['hour'] = df['DATETIME_GMT'].dt.hour
 df['day_of_week'] = df['DATETIME_GMT'].dt.dayofweek
